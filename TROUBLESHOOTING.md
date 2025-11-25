@@ -2,6 +2,59 @@
 
 ## Common Issues and Solutions
 
+### 0. Feature Store: "Feature view does not exist"
+
+**Symptoms:**
+```
+ERROR: Feature view user_features does not exist in project mlops_features
+```
+
+**Root Cause**: Feature definitions weren't properly applied to Feast registry.
+
+**Solution 1** (Use Simple Example):
+```bash
+# Use the simplified example that handles everything
+python run_simple_feature_store.py
+```
+
+**Solution 2** (Manual Fix):
+```bash
+# Navigate to feature repo
+cd feature_repo_simple
+
+# Check if features.py exists
+ls -la features.py
+
+# Apply feature definitions
+python -c "
+from feast import FeatureStore
+import importlib.util
+
+spec = importlib.util.spec_from_file_location('features', 'features.py')
+features = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(features)
+
+fs = FeatureStore(repo_path='.')
+fs.apply([features.user, features.user_features])
+print('✓ Features applied')
+"
+
+# Verify
+feast feature-views list
+
+# Materialize
+feast materialize-incremental $(date -u +"%Y-%m-%dT%H:%M:%S")
+```
+
+**Solution 3** (Start Fresh):
+```bash
+# Remove old feature repo
+rm -rf feature_repo/ feature_repo_simple/
+
+# Run simple example
+python run_simple_feature_store.py
+```
+
 ### 1. ModuleNotFoundError: No module named 'config' or 'training'
 
 **Symptoms:**

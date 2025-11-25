@@ -82,6 +82,23 @@ user_activity = FeatureView(
     description="User activity and engagement features"
 )
 
+# User features
+user_features = FeatureView(
+    name="user_features",
+    entities=[user],
+    schema=[
+        Field(name="age", dtype=Int64),
+        Field(name="income", dtype=Float32),
+        Field(name="amount", dtype=Float32),
+        Field(name="hour", dtype=Int64),
+        Field(name="day_of_week", dtype=Int64),
+        Field(name="is_weekend", dtype=Int64),
+    ],
+    source=user_source,
+    ttl=timedelta(days=365),
+    online=True,
+)
+
 # Transaction features
 transaction_features = FeatureView(
     name="transaction_features",

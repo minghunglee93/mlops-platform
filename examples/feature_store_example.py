@@ -11,7 +11,6 @@ Demonstrates:
 """
 import sys
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
@@ -137,7 +136,7 @@ user_entity = Entity(
 )
 
 user_source = FileSource(
-    path="feature_repo/data/user_features.parquet",
+    path="data/user_features.parquet",
     timestamp_field="event_timestamp",
 )
 
@@ -186,24 +185,35 @@ def materialize_features_to_online_store(store: MLOpsFeatureStore):
     logger.info("=" * 60)
 
     try:
-        # Materialize features
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=365)
+        from feast import FeatureStore as FeastStore
+        import os
 
-        import subprocess
-        result = subprocess.run(
-            ["feast", "materialize", start_date.isoformat(), end_date.isoformat()],
-            cwd="./feature_repo",
-            capture_output=True,
-            text=True
-        )
+        # Change to feature repo directory
+        original_dir = os.getcwd()
+        os.chdir(store.repo_path)
 
-        logger.info("✓ Features materialized to online store")
-        logger.info("  Features are now available for low-latency serving\n")
+        try:
+            # Materialize features using Feast API
+            fs = FeastStore(repo_path=".")
+
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=365)
+
+            # Materialize all feature views
+            fs.materialize(start_date=start_date, end_date=end_date)
+
+            logger.info("✓ Features materialized to online store")
+            logger.info("  Features are now available for low-latency serving")
+
+        finally:
+            os.chdir(original_dir)
 
     except Exception as e:
-        logger.warning(f"Could not materialize: {e}")
-        logger.info("  You can manually run: cd feature_repo && feast materialize <start> <end>\n")
+        logger.error(f"Could not materialize: {e}")
+        import traceback
+        traceback.print_exc()
+
+    logger.info("")
 
 
 def retrieve_online_features(store: MLOpsFeatureStore):
@@ -215,31 +225,49 @@ def retrieve_online_features(store: MLOpsFeatureStore):
     logger.info("=" * 60)
 
     try:
-        # Example: Get features for specific users
-        entity_rows = [
-            {"user_id": "user_0"},
-            {"user_id": "user_1"},
-            {"user_id": "user_2"},
-        ]
+        from feast import FeatureStore as FeastStore
+        import os
 
-        features = [
-            "user_features:age",
-            "user_features:income",
-            "user_features:amount",
-            "user_features:hour",
-        ]
+        # Change to feature repo directory
+        original_dir = os.getcwd()
+        os.chdir(store.repo_path)
 
-        online_features = store.get_online_features(
-            entity_rows=entity_rows,
-            features=features
-        )
+        try:
+            fs = FeastStore(repo_path=".")
 
-        logger.info("✓ Retrieved online features:")
-        print(online_features)
-        logger.info("")
+            # Example: Get features for specific users
+            entity_rows = [
+                {"user_id": "user_0"},
+                {"user_id": "user_1"},
+                {"user_id": "user_2"},
+            ]
+
+            features = [
+                "user_features:age",
+                "user_features:income",
+                "user_features:amount",
+                "user_features:hour",
+            ]
+
+            # Get online features
+            feature_vector = fs.get_online_features(
+                features=features,
+                entity_rows=entity_rows
+            )
+
+            online_features = feature_vector.to_df()
+
+            logger.info("✓ Retrieved online features:")
+            print(online_features)
+            logger.info("")
+
+        finally:
+            os.chdir(original_dir)
 
     except Exception as e:
         logger.warning(f"Could not retrieve online features: {e}")
+        import traceback
+        traceback.print_exc()
         logger.info("  Make sure features are materialized first\n")
 
 
@@ -252,32 +280,50 @@ def retrieve_historical_features(store: MLOpsFeatureStore, df: pd.DataFrame):
     logger.info("=" * 60)
 
     try:
-        # Create entity dataframe with timestamps
-        entity_df = df[['user_id', 'event_timestamp']].head(100).copy()
+        from feast import FeatureStore as FeastStore
+        import os
 
-        features = [
-            "user_features:age",
-            "user_features:income",
-            "user_features:amount",
-            "user_features:hour",
-            "user_features:day_of_week",
-            "user_features:is_weekend",
-        ]
+        # Change to feature repo directory
+        original_dir = os.getcwd()
+        os.chdir(store.repo_path)
 
-        training_df = store.get_historical_features(
-            entity_df=entity_df,
-            features=features
-        )
+        try:
+            fs = FeastStore(repo_path=".")
 
-        logger.info(f"✓ Retrieved {len(training_df)} historical feature rows")
-        logger.info("  Sample data:")
-        print(training_df.head())
-        logger.info("")
+            # Create entity dataframe with timestamps
+            entity_df = df[['user_id', 'event_timestamp']].head(100).copy()
 
-        return training_df
+            features = [
+                "user_features:age",
+                "user_features:income",
+                "user_features:amount",
+                "user_features:hour",
+                "user_features:day_of_week",
+                "user_features:is_weekend",
+            ]
+
+            # Get historical features
+            training_job = fs.get_historical_features(
+                entity_df=entity_df,
+                features=features
+            )
+
+            training_df = training_job.to_df()
+
+            logger.info(f"✓ Retrieved {len(training_df)} historical feature rows")
+            logger.info("  Sample data:")
+            print(training_df.head())
+            logger.info("")
+
+            return training_df
+
+        finally:
+            os.chdir(original_dir)
 
     except Exception as e:
         logger.warning(f"Could not retrieve historical features: {e}")
+        import traceback
+        traceback.print_exc()
         logger.info("  Continuing with generated features\n")
         return None
 

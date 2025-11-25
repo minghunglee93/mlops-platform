@@ -6,7 +6,6 @@ training (offline) and inference (online) workloads.
 """
 import sys
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from feast import FeatureStore, FeatureView, Entity, Field, FileSource
@@ -86,10 +85,10 @@ entity_key_serialization_version: 2
         logger.info(f"Created Feast configuration at {feature_store_yaml}")
 
     def register_entity(
-            self,
-            name: str,
-            description: str,
-            join_keys: List[str]
+        self,
+        name: str,
+        description: str,
+        join_keys: List[str]
     ) -> Entity:
         """
         Register an entity (e.g., user, product).
@@ -112,12 +111,12 @@ entity_key_serialization_version: 2
         return entity
 
     def create_feature_view(
-            self,
-            name: str,
-            entities: List[Entity],
-            schema: List[Field],
-            source: FileSource,
-            ttl: timedelta = timedelta(days=365)
+        self,
+        name: str,
+        entities: List[Entity],
+        schema: List[Field],
+        source: FileSource,
+        ttl: timedelta = timedelta(days=365)
     ) -> FeatureView:
         """
         Create a feature view definition.
@@ -144,9 +143,9 @@ entity_key_serialization_version: 2
         return feature_view
 
     def ingest_features(
-            self,
-            data: pd.DataFrame,
-            feature_view_name: str
+        self,
+        data: pd.DataFrame,
+        feature_view_name: str
     ):
         """
         Ingest features into the feature store.
@@ -170,10 +169,10 @@ entity_key_serialization_version: 2
             raise
 
     def materialize_features(
-            self,
-            feature_view_name: Optional[str] = None,
-            start_date: Optional[datetime] = None,
-            end_date: Optional[datetime] = None
+        self,
+        feature_view_name: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None
     ):
         """
         Materialize features from offline to online store.
@@ -206,9 +205,9 @@ entity_key_serialization_version: 2
             raise
 
     def get_online_features(
-            self,
-            entity_rows: List[Dict[str, Any]],
-            features: List[str]
+        self,
+        entity_rows: List[Dict[str, Any]],
+        features: List[str]
     ) -> pd.DataFrame:
         """
         Get features for online inference (low latency).
@@ -235,9 +234,9 @@ entity_key_serialization_version: 2
             raise
 
     def get_historical_features(
-            self,
-            entity_df: pd.DataFrame,
-            features: List[str]
+        self,
+        entity_df: pd.DataFrame,
+        features: List[str]
     ) -> pd.DataFrame:
         """
         Get historical features for training (point-in-time correct).
@@ -306,6 +305,25 @@ entity_key_serialization_version: 2
             logger.error(f"Error applying definitions: {e}")
             raise
 
+    def verify_feature_views(self) -> bool:
+        """
+        Verify that feature views are properly registered.
+
+        Returns:
+            True if feature views exist, False otherwise
+        """
+        try:
+            views = self.list_feature_views()
+            if views:
+                logger.info(f"✓ Found {len(views)} feature views: {views}")
+                return True
+            else:
+                logger.warning("No feature views found in registry")
+                return False
+        except Exception as e:
+            logger.error(f"Error verifying feature views: {e}")
+            return False
+
 
 def create_sample_features() -> pd.DataFrame:
     """
@@ -324,7 +342,7 @@ def create_sample_features() -> pd.DataFrame:
     data = {
         'entity_id': [f'entity_{i}' for i in range(n_samples)],
         'event_timestamp': [base_time - timedelta(days=np.random.randint(0, 365))
-                            for _ in range(n_samples)],
+                           for _ in range(n_samples)],
         'feature_1': np.random.randn(n_samples),
         'feature_2': np.random.randn(n_samples),
         'feature_3': np.random.randint(0, 10, n_samples),
