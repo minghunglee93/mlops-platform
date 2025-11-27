@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestClassifier
 
 from feature_store.store import MLOpsFeatureStore
-from feature_store.engineering import FeatureEngineer, generate_sample_data_with_features
+from feature_store.engineering import generate_sample_data_with_features
 from training.pipeline import TrainingPipeline
 import logging
 
@@ -198,6 +198,7 @@ def materialize_features_to_online_store(store: MLOpsFeatureStore):
     try:
         from feast import FeatureStore as FeastStore
         import os
+        import pytz
 
         # Change to feature repo directory
         original_dir = os.getcwd()
@@ -213,18 +214,23 @@ def materialize_features_to_online_store(store: MLOpsFeatureStore):
             test_df = pd.read_parquet(data_file)
             logger.info(f"✓ Data file verified: {len(test_df)} rows")
             logger.info(f"  Columns: {test_df.columns.tolist()}")
-            logger.info(f"  Date range: {test_df['event_timestamp'].min()} to {test_df['event_timestamp'].max()}")
 
-            # Materialize features using Feast API
-            fs = FeastStore(repo_path=".")
+            # Get date range from data and ensure timezone-aware
+            # Feast needs timezone-aware timestamps for materialization
+            end_date = pd.Timestamp(test_df['event_timestamp'].max())
+            start_date = pd.Timestamp(test_df['event_timestamp'].min())
 
-            # Use date range from actual data
-            end_date = test_df['event_timestamp'].max()
-            start_date = test_df['event_timestamp'].min()
+            # Make timezone-aware if they aren't already
+            if end_date.tz is None:
+                end_date = end_date.tz_localize('UTC')
+            if start_date.tz is None:
+                start_date = start_date.tz_localize('UTC')
 
-            logger.info(f"Materializing from {start_date} to {end_date}...")
+            logger.info(f"  Date range: {start_date} to {end_date}")
+            logger.info(f"Materializing features...")
 
             # Materialize all feature views
+            fs = FeastStore(repo_path=".")
             fs.materialize(start_date=start_date, end_date=end_date)
 
             logger.info("✓ Features materialized to online store")
@@ -372,11 +378,14 @@ def train_model_with_features(df: pd.DataFrame):
     y = df['target']
 
     # Initialize pipeline
+    logger.info("Initializing Pipeline")
     pipeline = TrainingPipeline(
         experiment_name="feature_store_experiment",
         model_type="sklearn"
     )
+    logger.info("Pipeline Initialized")
 
+    logger.info("Preparing data")
     # Prepare train/test split
     from sklearn.model_selection import train_test_split
     X_train, X_test, y_train, y_test = train_test_split(
@@ -464,8 +473,11 @@ def main():
         # Step 7: Train model
         model, metrics = train_model_with_features(df)
 
-        # Step 8: Show benefits
-        demonstrate_feature_store_benefits()
+        if model is None:
+            logger.error("Training failed! Skipping remaining steps.")
+        else:
+            # Step 8: Show benefits
+            demonstrate_feature_store_benefits()
 
         logger.info("=" * 60)
         logger.info("FEATURE STORE WORKFLOW COMPLETE! 🎉")

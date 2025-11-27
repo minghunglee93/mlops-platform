@@ -141,9 +141,21 @@ class TrainingPipeline:
 
             # Log model
             if self.model_type == "sklearn":
-                mlflow.sklearn.log_model(model, "model")
+                # Create input example and signature for better model tracking
+                input_example = X_test[:5] if len(X_test) > 5 else X_test
+                mlflow.sklearn.log_model(
+                    model,
+                    artifact_path="model",
+                    input_example=input_example
+                )
             elif self.model_type == "pytorch":
-                mlflow.pytorch.log_model(model, "model")
+                # For PyTorch, create a sample input
+                input_example = torch.FloatTensor(X_test[:5]) if len(X_test) > 5 else torch.FloatTensor(X_test)
+                mlflow.pytorch.log_model(
+                    model,
+                    artifact_path="model",
+                    input_example=input_example.numpy()
+                )
 
             # Save model locally
             model_path = settings.MODEL_DIR / f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"

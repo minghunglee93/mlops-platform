@@ -5,7 +5,6 @@ Provides functions to compute and transform features for the feature store.
 """
 import sys
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
@@ -28,9 +27,9 @@ class FeatureEngineer:
         self.feature_transformers = {}
 
     def create_time_features(
-            self,
-            df: pd.DataFrame,
-            timestamp_col: str = "timestamp"
+        self,
+        df: pd.DataFrame,
+        timestamp_col: str = "timestamp"
     ) -> pd.DataFrame:
         """
         Create time-based features.
@@ -57,11 +56,11 @@ class FeatureEngineer:
         return df
 
     def create_aggregation_features(
-            self,
-            df: pd.DataFrame,
-            group_by: str,
-            value_col: str,
-            windows: List[int] = [7, 30, 90]
+        self,
+        df: pd.DataFrame,
+        group_by: str,
+        value_col: str,
+        windows: List[int] = [7, 30, 90]
     ) -> pd.DataFrame:
         """
         Create rolling aggregation features.
@@ -103,10 +102,10 @@ class FeatureEngineer:
         return df
 
     def create_categorical_features(
-            self,
-            df: pd.DataFrame,
-            categorical_cols: List[str],
-            method: str = "onehot"
+        self,
+        df: pd.DataFrame,
+        categorical_cols: List[str],
+        method: str = "onehot"
     ) -> pd.DataFrame:
         """
         Encode categorical features.
@@ -133,9 +132,9 @@ class FeatureEngineer:
         return df
 
     def create_interaction_features(
-            self,
-            df: pd.DataFrame,
-            feature_pairs: List[tuple]
+        self,
+        df: pd.DataFrame,
+        feature_pairs: List[tuple]
     ) -> pd.DataFrame:
         """
         Create interaction features between pairs of features.
@@ -161,9 +160,9 @@ class FeatureEngineer:
         return df
 
     def create_statistical_features(
-            self,
-            df: pd.DataFrame,
-            numeric_cols: List[str]
+        self,
+        df: pd.DataFrame,
+        numeric_cols: List[str]
     ) -> pd.DataFrame:
         """
         Create statistical features from numeric columns.
@@ -197,10 +196,10 @@ class FeatureEngineer:
         return df
 
     def compute_feature_importance(
-            self,
-            X: pd.DataFrame,
-            y: pd.Series,
-            method: str = "random_forest"
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+        method: str = "random_forest"
     ) -> pd.DataFrame:
         """
         Compute feature importance scores.
@@ -252,7 +251,7 @@ def generate_sample_data_with_features(n_samples: int = 1000) -> pd.DataFrame:
     data = {
         'user_id': [f'user_{i % 100}' for i in range(n_samples)],
         'event_timestamp': [base_time - timedelta(days=np.random.randint(0, 365))
-                            for _ in range(n_samples)],
+                           for _ in range(n_samples)],
         'amount': np.random.exponential(50, n_samples),
         'age': np.random.randint(18, 80, n_samples),
         'income': np.random.lognormal(10, 1, n_samples),
@@ -261,6 +260,9 @@ def generate_sample_data_with_features(n_samples: int = 1000) -> pd.DataFrame:
     }
 
     df = pd.DataFrame(data)
+
+    # Make timestamps timezone-aware (required by Feast)
+    df['event_timestamp'] = pd.to_datetime(df['event_timestamp']).dt.tz_localize('UTC')
 
     # Apply feature engineering
     engineer = FeatureEngineer()
@@ -276,8 +278,8 @@ def generate_sample_data_with_features(n_samples: int = 1000) -> pd.DataFrame:
 
     # Add target variable
     df['target'] = (
-            (df['amount'] > df['amount'].median()) &
-            (df['age'] > df['age'].median())
+        (df['amount'] > df['amount'].median()) &
+        (df['age'] > df['age'].median())
     ).astype(int)
 
     logger.info(f"Generated {len(df)} samples with {len(df.columns)} features")

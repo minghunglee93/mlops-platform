@@ -6,7 +6,6 @@ without complex error handling. Use this to understand the basics.
 """
 import sys
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
@@ -63,6 +62,9 @@ entity_key_serialization_version: 2
         'income': np.random.lognormal(10, 1, n_samples),
         'transaction_count': np.random.randint(0, 50, n_samples),
     })
+
+    # Ensure timestamps are timezone-aware (UTC)
+    data['event_timestamp'] = pd.to_datetime(data['event_timestamp']).dt.tz_localize('UTC')
 
     # Save to parquet
     data_path = repo_path / "data" / "user_features.parquet"
