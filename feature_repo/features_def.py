@@ -10,7 +10,7 @@ user_entity = Entity(
 )
 
 user_source = FileSource(
-    path="feature_repo/data/user_features.parquet",
+    path="data/user_features.parquet",
     timestamp_field="event_timestamp",
 )
 

@@ -73,8 +73,19 @@ def engineer_features():
     ]].copy()
 
     # Save to parquet
-    user_features.to_parquet(feature_data_path / "user_features.parquet", index=False)
-    logger.info(f"✓ Saved features to {feature_data_path / 'user_features.parquet'}\n")
+    parquet_path = feature_data_path / "user_features.parquet"
+    user_features.to_parquet(parquet_path, index=False)
+    logger.info(f"✓ Saved features to {parquet_path}")
+
+    # Verify the file exists and is readable
+    if parquet_path.exists():
+        test_df = pd.read_parquet(parquet_path)
+        logger.info(f"✓ Verified: {len(test_df)} rows, {len(test_df.columns)} columns")
+        logger.info(f"  Columns: {test_df.columns.tolist()}")
+    else:
+        logger.error(f"✗ File not created: {parquet_path}")
+
+    logger.info("")
 
     return df, user_features
 
@@ -193,11 +204,25 @@ def materialize_features_to_online_store(store: MLOpsFeatureStore):
         os.chdir(store.repo_path)
 
         try:
+            # Verify data file exists before materializing
+            data_file = Path("data/user_features.parquet")
+            if not data_file.exists():
+                raise FileNotFoundError(f"Data file not found: {data_file.absolute()}")
+
+            # Read and verify data
+            test_df = pd.read_parquet(data_file)
+            logger.info(f"✓ Data file verified: {len(test_df)} rows")
+            logger.info(f"  Columns: {test_df.columns.tolist()}")
+            logger.info(f"  Date range: {test_df['event_timestamp'].min()} to {test_df['event_timestamp'].max()}")
+
             # Materialize features using Feast API
             fs = FeastStore(repo_path=".")
 
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=365)
+            # Use date range from actual data
+            end_date = test_df['event_timestamp'].max()
+            start_date = test_df['event_timestamp'].min()
+
+            logger.info(f"Materializing from {start_date} to {end_date}...")
 
             # Materialize all feature views
             fs.materialize(start_date=start_date, end_date=end_date)
