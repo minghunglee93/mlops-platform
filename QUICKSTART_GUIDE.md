@@ -45,7 +45,7 @@ python run_feature_store.py
 
 ```bash
 # Start MLflow UI (in a new terminal)
-mlflow ui
+mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root ./mlruns
 
 # Open browser to: http://localhost:5000
 ```
@@ -121,7 +121,7 @@ python run_training.py
 python run_feature_store.py
 
 # View experiments
-mlflow ui
+mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root ./mlruns
 
 # Explore features (NEW!)
 cd feature_repo && feast feature-views list

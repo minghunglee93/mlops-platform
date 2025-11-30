@@ -2,7 +2,7 @@
 Model Serving API with FastAPI
 """
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 import numpy as np
@@ -12,9 +12,16 @@ import mlflow
 from prometheus_client import Counter, Histogram, generate_latest
 from fastapi.responses import Response
 import time
+import sys
+from pathlib import Path
+import pandas as pd
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import settings
 from registry.model_registry import ModelRegistry
+from monitoring.drift_detector import DriftDetector
 
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
@@ -32,10 +39,16 @@ REQUEST_LATENCY = Histogram(
     ['model_name', 'version']
 )
 
+DRIFT_DETECTED = Counter(
+    'drift_detected_total',
+    'Total drift detections',
+    ['model_name']
+)
+
 # FastAPI app
 app = FastAPI(
     title="MLOps Model Serving API",
-    description="Production-grade model serving with monitoring",
+    description="Production-grade model serving with monitoring and drift detection",
     version=settings.VERSION
 )
 
@@ -45,6 +58,10 @@ registry = ModelRegistry()
 # Loaded models cache
 loaded_models: Dict[str, Any] = {}
 
+# Drift detector (initialized with reference data)
+drift_detector: Optional[DriftDetector] = None
+reference_data_buffer: List[Dict] = []  # Store recent predictions for drift detection
+
 
 # Request/Response Models
 class PredictionRequest(BaseModel):
@@ -52,7 +69,7 @@ class PredictionRequest(BaseModel):
     features: List[List[float]] = Field(..., description="Input features for prediction")
     model_name: str = Field(..., description="Name of the model to use")
     version: Optional[str] = Field(None, description="Specific model version (optional)")
-    
+
     class Config:
         schema_extra = {
             "example": {
@@ -90,20 +107,20 @@ class HealthResponse(BaseModel):
 def load_model(model_name: str, version: Optional[str] = None) -> Any:
     """
     Load model from registry with caching.
-    
+
     Args:
         model_name: Name of the model
         version: Specific version or None for latest
-        
+
     Returns:
         Loaded model
     """
     cache_key = f"{model_name}_{version or 'latest'}"
-    
+
     if cache_key in loaded_models:
         logger.info(f"Using cached model: {cache_key}")
         return loaded_models[cache_key]
-    
+
     try:
         logger.info(f"Loading model: {cache_key}")
         if version:
@@ -112,10 +129,10 @@ def load_model(model_name: str, version: Optional[str] = None) -> Any:
             model = registry.get_production_model(model_name)
             if model is None:
                 model = registry.get_model(model_name)
-        
+
         loaded_models[cache_key] = model
         return model
-        
+
     except Exception as e:
         logger.error(f"Error loading model {model_name}: {e}")
         raise HTTPException(status_code=404, detail=f"Model not found: {model_name}")
@@ -143,52 +160,61 @@ async def health_check():
 
 
 @app.post("/predict", response_model=PredictionResponse)
-async def predict(request: PredictionRequest):
+async def predict(request: PredictionRequest, background_tasks: BackgroundTasks):
     """
     Make predictions using a registered model.
-    
+
     Args:
         request: Prediction request with features and model info
-        
+        background_tasks: FastAPI background tasks
+
     Returns:
         Predictions with metadata
     """
     start_time = time.time()
-    
+
     try:
         # Load model
         model = load_model(request.model_name, request.version)
-        
+
         # Convert features to numpy array
         features = np.array(request.features)
-        
+
         # Make predictions
         predictions = model.predict(features)
-        
+
         # Convert to list for JSON serialization
         if isinstance(predictions, np.ndarray):
             predictions = predictions.tolist()
-        
+
         # Calculate latency
         latency = (time.time() - start_time) * 1000  # Convert to ms
-        
+
         # Get model version
         version = request.version or "latest"
-        
+
+        # Store prediction for drift detection (in background)
+        if settings.ENABLE_MONITORING:
+            background_tasks.add_task(
+                store_prediction_for_drift_detection,
+                features=request.features,
+                predictions=predictions
+            )
+
         # Update metrics
         REQUEST_COUNT.labels(
             model_name=request.model_name,
             version=version,
             status="success"
         ).inc()
-        
+
         REQUEST_LATENCY.labels(
             model_name=request.model_name,
             version=version
         ).observe(latency / 1000)
-        
+
         logger.info(f"Prediction successful: {request.model_name} v{version}, latency: {latency:.2f}ms")
-        
+
         return PredictionResponse(
             predictions=predictions,
             model_name=request.model_name,
@@ -196,14 +222,14 @@ async def predict(request: PredictionRequest):
             timestamp=datetime.now().isoformat(),
             latency_ms=round(latency, 2)
         )
-        
+
     except Exception as e:
         REQUEST_COUNT.labels(
             model_name=request.model_name,
             version=request.version or "latest",
             status="error"
         ).inc()
-        
+
         logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -212,7 +238,7 @@ async def predict(request: PredictionRequest):
 async def list_models():
     """
     List all registered models.
-    
+
     Returns:
         List of models with versions
     """
@@ -228,10 +254,10 @@ async def list_models():
 async def get_model_info(model_name: str):
     """
     Get information about a specific model.
-    
+
     Args:
         model_name: Name of the model
-        
+
     Returns:
         Model information
     """
@@ -239,7 +265,7 @@ async def get_model_info(model_name: str):
         versions = registry.get_model_versions(model_name)
         if not versions:
             raise HTTPException(status_code=404, detail=f"Model not found: {model_name}")
-        
+
         return ModelInfo(
             name=model_name,
             versions=versions,
@@ -260,11 +286,11 @@ async def load_model_endpoint(
 ):
     """
     Preload a model into cache.
-    
+
     Args:
         model_name: Name of the model
         version: Specific version (optional)
-        
+
     Returns:
         Success message
     """
@@ -283,16 +309,16 @@ async def load_model_endpoint(
 async def unload_model(model_name: str, version: Optional[str] = None):
     """
     Unload a model from cache.
-    
+
     Args:
         model_name: Name of the model
         version: Specific version (optional)
-        
+
     Returns:
         Success message
     """
     cache_key = f"{model_name}_{version or 'latest'}"
-    
+
     if cache_key in loaded_models:
         del loaded_models[cache_key]
         logger.info(f"Unloaded model: {cache_key}")
@@ -305,11 +331,193 @@ async def unload_model(model_name: str, version: Optional[str] = None):
 async def metrics():
     """
     Prometheus metrics endpoint.
-    
+
     Returns:
         Prometheus metrics in text format
     """
     return Response(content=generate_latest(), media_type="text/plain")
+
+
+# Drift Detection Endpoints
+
+def store_prediction_for_drift_detection(features: List[List[float]], predictions: List[Any]):
+    """Store prediction data for drift detection (background task)."""
+    global reference_data_buffer
+
+    for feature_row, pred in zip(features, predictions):
+        reference_data_buffer.append({
+            'timestamp': datetime.now().isoformat(),
+            'features': feature_row,
+            'prediction': pred
+        })
+
+    # Keep only recent N samples
+    max_buffer_size = 1000
+    if len(reference_data_buffer) > max_buffer_size:
+        reference_data_buffer = reference_data_buffer[-max_buffer_size:]
+
+
+@app.post("/drift/initialize")
+async def initialize_drift_detection(reference_file: Optional[str] = None):
+    """
+    Initialize drift detector with reference data.
+
+    Args:
+        reference_file: Path to reference data CSV (optional)
+
+    Returns:
+        Status message
+    """
+    global drift_detector
+
+    try:
+        if reference_file:
+            # Load from file
+            reference_df = pd.read_csv(reference_file)
+        elif reference_data_buffer:
+            # Use buffered predictions
+            reference_df = pd.DataFrame([
+                {'feature_' + str(i): val for i, val in enumerate(item['features'])}
+                for item in reference_data_buffer[-500:]  # Use last 500
+            ])
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="No reference data available. Make some predictions first or provide reference_file"
+            )
+
+        drift_detector = DriftDetector(
+            reference_data=reference_df,
+            drift_threshold=settings.DRIFT_DETECTION_THRESHOLD
+        )
+
+        logger.info(f"Drift detector initialized with {len(reference_df)} reference samples")
+
+        return {
+            "status": "success",
+            "message": f"Drift detector initialized with {len(reference_df)} samples"
+        }
+
+    except Exception as e:
+        logger.error(f"Error initializing drift detector: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/drift/detect")
+async def detect_drift():
+    """
+    Detect drift in recent production data.
+
+    Returns:
+        Drift detection results
+    """
+    global drift_detector, reference_data_buffer
+
+    if drift_detector is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Drift detector not initialized. Call /drift/initialize first"
+        )
+
+    if len(reference_data_buffer) < 50:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Not enough production data. Have {len(reference_data_buffer)}, need at least 50"
+        )
+
+    try:
+        # Create current data from recent predictions
+        current_df = pd.DataFrame([
+            {'feature_' + str(i): val for i, val in enumerate(item['features'])}
+            for item in reference_data_buffer[-200:]  # Use last 200
+        ])
+
+        # Detect drift
+        drift_summary = drift_detector.detect_data_drift(current_df)
+
+        # Check if alert needed
+        if drift_detector.should_alert(drift_summary):
+            DRIFT_DETECTED.labels(model_name="current_model").inc()
+            logger.warning("🚨 DRIFT ALERT TRIGGERED")
+
+        return {
+            "status": "success",
+            "drift_detected": drift_summary['dataset_drift'],
+            "drift_share": drift_summary['drift_share'],
+            "drifted_columns": drift_summary['number_of_drifted_columns'],
+            "report_path": drift_summary['report_path'],
+            "alert": drift_detector.should_alert(drift_summary),
+            "timestamp": drift_summary['timestamp']
+        }
+
+    except Exception as e:
+        logger.error(f"Error detecting drift: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/drift/report/{report_name}")
+async def get_drift_report(report_name: str):
+    """
+    Retrieve a drift detection report.
+
+    Args:
+        report_name: Name of the report file
+
+    Returns:
+        HTML report
+    """
+    report_path = Path("drift_reports") / report_name
+
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    return FileResponse(
+        path=str(report_path),
+        media_type="text/html",
+        filename=report_name
+    )
+
+
+@app.get("/drift/reports")
+async def list_drift_reports():
+    """
+    List all available drift reports.
+
+    Returns:
+        List of report files
+    """
+    reports_dir = Path("drift_reports")
+
+    if not reports_dir.exists():
+        return {"reports": []}
+
+    reports = [
+        {
+            "name": report.name,
+            "created": datetime.fromtimestamp(report.stat().st_mtime).isoformat(),
+            "size_kb": report.stat().st_size / 1024
+        }
+        for report in sorted(reports_dir.glob("*.html"), key=lambda x: x.stat().st_mtime, reverse=True)
+    ]
+
+    return {"reports": reports, "total": len(reports)}
+
+
+@app.get("/drift/status")
+async def drift_detection_status():
+    """
+    Get drift detection system status.
+
+    Returns:
+        Status information
+    """
+    return {
+        "initialized": drift_detector is not None,
+        "buffer_size": len(reference_data_buffer),
+        "reference_samples": len(drift_detector.reference_data) if drift_detector else 0,
+        "drift_threshold": settings.DRIFT_DETECTION_THRESHOLD if drift_detector else None,
+        "monitoring_enabled": settings.ENABLE_MONITORING
+    }
 
 
 # Batch prediction endpoint
@@ -325,37 +533,37 @@ class BatchPredictionRequest(BaseModel):
 async def batch_predict(request: BatchPredictionRequest):
     """
     Make batch predictions with optimized processing.
-    
+
     Args:
         request: Batch prediction request
-        
+
     Returns:
         Batch predictions with metadata
     """
     start_time = time.time()
-    
+
     try:
         model = load_model(request.model_name, request.version)
         features = np.array(request.features)
-        
+
         # Process in batches
         predictions = []
         for i in range(0, len(features), request.batch_size):
             batch = features[i:i + request.batch_size]
             batch_preds = model.predict(batch)
             predictions.extend(batch_preds.tolist() if isinstance(batch_preds, np.ndarray) else batch_preds)
-        
+
         latency = (time.time() - start_time) * 1000
         version = request.version or "latest"
-        
+
         REQUEST_COUNT.labels(
             model_name=request.model_name,
             version=version,
             status="success"
         ).inc()
-        
+
         logger.info(f"Batch prediction: {len(features)} samples in {latency:.2f}ms")
-        
+
         return PredictionResponse(
             predictions=predictions,
             model_name=request.model_name,
@@ -363,7 +571,7 @@ async def batch_predict(request: BatchPredictionRequest):
             timestamp=datetime.now().isoformat(),
             latency_ms=round(latency, 2)
         )
-        
+
     except Exception as e:
         logger.error(f"Batch prediction error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

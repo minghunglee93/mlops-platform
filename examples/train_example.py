@@ -11,8 +11,6 @@ import pandas as pd
 
 from training.pipeline import TrainingPipeline, ExperimentTracker
 from registry.model_registry import ModelRegistry
-from config import settings
-
 
 def create_sample_data():
     """Create sample classification dataset."""
