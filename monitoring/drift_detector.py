@@ -14,26 +14,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 import logging
-from datetime import datetime, timedelta
-import json
+from datetime import datetime
 
-from evidently.report import Report
-from evidently.metric_preset import DataDriftPreset, TargetDriftPreset, DataQualityPreset
-from evidently.metrics import (
-    DatasetDriftMetric,
-    DatasetMissingValuesMetric,
-    ColumnDriftMetric,
-    ColumnSummaryMetric
-)
-from evidently.test_suite import TestSuite
-from evidently.tests import (
-    TestNumberOfDriftedColumns,
-    TestShareOfDriftedColumns,
-    TestColumnsType,
-    TestNumberOfMissingValues
-)
+from evidently import Dataset, DataDefinition, Report
+from evidently.presets import DataDriftPreset, DataSummaryPreset
 
 from config import settings
 
@@ -66,7 +52,7 @@ class DriftDetector:
             drift_threshold: Threshold for individual feature drift (0-1)
             alert_threshold: Threshold for overall drift alert (0-1)
         """
-        self.reference_data = reference_data
+        self.reference_data = Dataset.from_pandas(reference_data)
         self.drift_threshold = drift_threshold
         self.alert_threshold = alert_threshold
         self.drift_reports_dir = Path("drift_reports")
@@ -96,19 +82,21 @@ class DriftDetector:
             DataDriftPreset(drift_share=self.drift_threshold),
         ])
 
-        data_drift_report.run(
+        eval_data = Dataset.from_pandas(current_data, data_definition=DataDefinition())
+
+        final_report = data_drift_report.run(
             reference_data=self.reference_data,
-            current_data=current_data,
-            column_mapping=column_mapping
+            current_data=eval_data
         )
 
         # Save report
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = self.drift_reports_dir / f"data_drift_{timestamp}.html"
-        data_drift_report.save_html(str(report_path))
+        final_report.save_html(str(report_path))
 
         # Extract metrics
-        report_dict = data_drift_report.as_dict()
+        report_dict = final_report.dict()
+        logger.info(f"Report Shape {report_dict}")
         metrics = report_dict['metrics'][0]['result']
 
         drift_summary = {
@@ -147,24 +135,24 @@ class DriftDetector:
 
         # Create target drift report
         target_drift_report = Report(metrics=[
-            TargetDriftPreset(),
+            DataDriftPreset(),
         ])
 
         column_mapping = {'target': target_column}
+        eval_data = Dataset.from_pandas(current_data, data_definition=DataDefinition())
 
-        target_drift_report.run(
+        final_report = target_drift_report.run(
             reference_data=self.reference_data,
-            current_data=current_data,
-            column_mapping=column_mapping
+            current_data=eval_data
         )
 
         # Save report
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = self.drift_reports_dir / f"target_drift_{timestamp}.html"
-        target_drift_report.save_html(str(report_path))
+        final_report.save_html(str(report_path))
 
         # Extract metrics
-        report_dict = target_drift_report.as_dict()
+        report_dict = final_report.dict()
 
         drift_summary = {
             'timestamp': timestamp,
@@ -175,104 +163,6 @@ class DriftDetector:
         logger.info(f"  Report saved: {report_path}")
 
         return drift_summary
-
-    def detect_column_drift(
-            self,
-            current_data: pd.DataFrame,
-            column_name: str
-    ) -> Dict[str, Any]:
-        """
-        Detect drift for a specific column.
-
-        Args:
-            current_data: New production data
-            column_name: Column to analyze
-
-        Returns:
-            Dictionary with column drift metrics
-        """
-        logger.info(f"Detecting drift for column: {column_name}")
-
-        # Create column drift report
-        column_drift_report = Report(metrics=[
-            ColumnDriftMetric(column_name=column_name),
-            ColumnSummaryMetric(column_name=column_name)
-        ])
-
-        column_drift_report.run(
-            reference_data=self.reference_data,
-            current_data=current_data
-        )
-
-        # Extract metrics
-        report_dict = column_drift_report.as_dict()
-        drift_metric = report_dict['metrics'][0]['result']
-
-        drift_summary = {
-            'column': column_name,
-            'drift_detected': drift_metric.get('drift_detected', False),
-            'drift_score': drift_metric.get('drift_score', 0.0),
-            'stattest_name': drift_metric.get('stattest_name', 'unknown')
-        }
-
-        logger.info(f"Column '{column_name}' drift: {drift_summary['drift_detected']} "
-                    f"(score: {drift_summary['drift_score']:.4f})")
-
-        return drift_summary
-
-    def run_drift_tests(
-            self,
-            current_data: pd.DataFrame,
-            max_drift_share: float = 0.3
-    ) -> Dict[str, Any]:
-        """
-        Run automated drift tests with pass/fail criteria.
-
-        Args:
-            current_data: New production data
-            max_drift_share: Maximum allowed share of drifted columns
-
-        Returns:
-            Dictionary with test results
-        """
-        logger.info("Running drift test suite...")
-
-        # Create test suite
-        drift_tests = TestSuite(tests=[
-            TestNumberOfDriftedColumns(),
-            TestShareOfDriftedColumns(lt=max_drift_share),
-            TestColumnsType(),
-            TestNumberOfMissingValues()
-        ])
-
-        drift_tests.run(
-            reference_data=self.reference_data,
-            current_data=current_data
-        )
-
-        # Save test results
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = self.drift_reports_dir / f"drift_tests_{timestamp}.html"
-        drift_tests.save_html(str(report_path))
-
-        # Extract results
-        test_results = drift_tests.as_dict()
-
-        summary = {
-            'timestamp': timestamp,
-            'all_tests_passed': test_results['summary']['all_passed'],
-            'total_tests': test_results['summary']['total_tests'],
-            'success_tests': test_results['summary']['success_tests'],
-            'failed_tests': test_results['summary']['failed_tests'],
-            'report_path': str(report_path)
-        }
-
-        logger.info(f"Drift tests complete:")
-        logger.info(f"  All tests passed: {summary['all_tests_passed']}")
-        logger.info(f"  Success: {summary['success_tests']}/{summary['total_tests']}")
-        logger.info(f"  Report saved: {report_path}")
-
-        return summary
 
     def generate_data_quality_report(
             self,
@@ -291,18 +181,21 @@ class DriftDetector:
 
         # Create quality report
         quality_report = Report(metrics=[
-            DataQualityPreset(),
-        ])
+            DataSummaryPreset()
+        ],
+        include_tests=True)
 
-        quality_report.run(
+        eval_data = Dataset.from_pandas(current_data, data_definition=DataDefinition())
+
+        final_report = quality_report.run(
             reference_data=self.reference_data,
-            current_data=current_data
+            current_data=eval_data
         )
 
         # Save report
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = self.drift_reports_dir / f"data_quality_{timestamp}.html"
-        quality_report.save_html(str(report_path))
+        final_report.save_html(str(report_path))
 
         logger.info(f"Data quality report saved: {report_path}")
 
@@ -497,11 +390,8 @@ if __name__ == "__main__":
     # Detect drift
     drift_summary = detector.detect_data_drift(current_df)
 
-    # Run tests
-    test_results = detector.run_drift_tests(current_df)
-
-    # Check if alert needed
-    if detector.should_alert(drift_summary):
-        print("🚨 DRIFT ALERT: Significant drift detected!")
+    # # Check if alert needed
+    # if detector.should_alert(drift_summary):
+    #     print("🚨 DRIFT ALERT: Significant drift detected!")
 
     print(f"\nReports generated in: {detector.drift_reports_dir}")

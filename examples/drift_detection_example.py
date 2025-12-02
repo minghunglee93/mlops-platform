@@ -141,20 +141,6 @@ def demo_data_drift_detection(detector, production_df):
     # Detect overall data drift
     drift_summary = detector.detect_data_drift(production_df)
 
-    # Check specific columns
-    logger.info("\nAnalyzing individual features...")
-    drifted_features = []
-
-    for col in [c for c in production_df.columns if c.startswith('feature_')][:5]:
-        col_drift = detector.detect_column_drift(production_df, col)
-        if col_drift['drift_detected']:
-            drifted_features.append(col)
-
-    if drifted_features:
-        logger.info(f"⚠️  Drifted features: {drifted_features}")
-    else:
-        logger.info("✓ No significant feature drift detected")
-
     return drift_summary
 
 
