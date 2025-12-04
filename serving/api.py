@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import settings
 from registry.model_registry import ModelRegistry
 from monitoring.drift_detector import DriftDetector
+from ab_testing.experiment import ABExperiment, ModelVariant, TrafficSplitStrategy
 
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
@@ -45,10 +46,16 @@ DRIFT_DETECTED = Counter(
     ['model_name']
 )
 
+AB_TEST_REQUESTS = Counter(
+    'ab_test_requests_total',
+    'Total A/B test requests',
+    ['experiment_name', 'variant']
+)
+
 # FastAPI app
 app = FastAPI(
     title="MLOps Model Serving API",
-    description="Production-grade model serving with monitoring and drift detection",
+    description="Production-grade model serving with monitoring, drift detection, and A/B testing",
     version=settings.VERSION
 )
 
@@ -61,6 +68,9 @@ loaded_models: Dict[str, Any] = {}
 # Drift detector (initialized with reference data)
 drift_detector: Optional[DriftDetector] = None
 reference_data_buffer: List[Dict] = []  # Store recent predictions for drift detection
+
+# A/B testing experiments
+active_experiments: Dict[str, ABExperiment] = {}
 
 
 # Request/Response Models
@@ -517,6 +527,351 @@ async def drift_detection_status():
         "reference_samples": len(drift_detector.reference_data) if drift_detector else 0,
         "drift_threshold": settings.DRIFT_DETECTION_THRESHOLD if drift_detector else None,
         "monitoring_enabled": settings.ENABLE_MONITORING
+    }
+
+
+# A/B Testing Endpoints
+
+@app.post("/ab/experiments")
+async def create_ab_experiment(
+    experiment_name: str,
+    variant_names: List[str],
+    variant_versions: List[str],
+    strategy: str = "fixed",
+    traffic_weights: Optional[List[float]] = None
+):
+    """
+    Create a new A/B testing experiment.
+
+    Args:
+        experiment_name: Name of the experiment
+        variant_names: Names of variants (e.g., ["champion", "challenger"])
+        variant_versions: Model versions for each variant
+        strategy: Traffic split strategy (fixed, epsilon_greedy, thompson_sampling, ucb)
+        traffic_weights: Traffic weights for each variant (for fixed strategy)
+
+    Returns:
+        Experiment details
+    """
+    global active_experiments
+
+    if experiment_name in active_experiments:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Experiment '{experiment_name}' already exists"
+        )
+
+    if len(variant_names) != len(variant_versions):
+        raise HTTPException(
+            status_code=400,
+            detail="Number of variant names must match number of versions"
+        )
+
+    # Create variants
+    variants = []
+    if traffic_weights is None:
+        traffic_weights = [1.0 / len(variant_names)] * len(variant_names)
+
+    for name, version, weight in zip(variant_names, variant_versions, traffic_weights):
+        variants.append(ModelVariant(
+            name=name,
+            model_version=version,
+            traffic_weight=weight
+        ))
+
+    # Create experiment
+    try:
+        strategy_enum = TrafficSplitStrategy(strategy)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid strategy: {strategy}. Must be one of: fixed, epsilon_greedy, thompson_sampling, ucb"
+        )
+
+    experiment = ABExperiment(
+        experiment_name=experiment_name,
+        variants=variants,
+        strategy=strategy_enum
+    )
+
+    active_experiments[experiment_name] = experiment
+
+    logger.info(f"Created A/B experiment: {experiment_name}")
+
+    return {
+        "status": "success",
+        "experiment_name": experiment_name,
+        "variants": [v.to_dict() for v in variants],
+        "strategy": strategy
+    }
+
+
+@app.post("/ab/predict/{experiment_name}")
+async def ab_predict(
+    experiment_name: str,
+    request: PredictionRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Make prediction using A/B test variant selection.
+
+    Args:
+        experiment_name: Name of the experiment
+        request: Prediction request
+        background_tasks: FastAPI background tasks
+
+    Returns:
+        Prediction with variant information
+    """
+    if experiment_name not in active_experiments:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Experiment '{experiment_name}' not found"
+        )
+
+    experiment = active_experiments[experiment_name]
+
+    start_time = time.time()
+
+    try:
+        # Select variant
+        variant_name = experiment.select_variant()
+        variant = experiment.variants[variant_name]
+
+        # Load model for this variant
+        model = load_model(request.model_name, variant.model_version)
+
+        # Convert features
+        features = np.array(request.features)
+
+        # Make predictions
+        predictions = model.predict(features)
+
+        if isinstance(predictions, np.ndarray):
+            predictions = predictions.tolist()
+
+        latency = (time.time() - start_time) * 1000
+
+        # Record in experiment (assume success for now)
+        # In production, you'd record actual success based on user feedback
+        experiment.record_result(
+            variant_name=variant_name,
+            success=True,
+            reward=1.0
+        )
+
+        # Update metrics
+        AB_TEST_REQUESTS.labels(
+            experiment_name=experiment_name,
+            variant=variant_name
+        ).inc()
+
+        REQUEST_COUNT.labels(
+            model_name=request.model_name,
+            version=variant.model_version,
+            status="success"
+        ).inc()
+
+        logger.info(f"A/B prediction: experiment={experiment_name}, variant={variant_name}")
+
+        return {
+            "predictions": predictions,
+            "model_name": request.model_name,
+            "model_version": variant.model_version,
+            "experiment_name": experiment_name,
+            "variant": variant_name,
+            "timestamp": datetime.now().isoformat(),
+            "latency_ms": round(latency, 2)
+        }
+
+    except Exception as e:
+        logger.error(f"A/B prediction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ab/experiments")
+async def list_ab_experiments():
+    """
+    List all active A/B experiments.
+
+    Returns:
+        List of experiments
+    """
+    experiments = []
+    for name, exp in active_experiments.items():
+        results = exp.get_results()
+        experiments.append(results)
+
+    return {"experiments": experiments, "total": len(experiments)}
+
+
+@app.get("/ab/experiments/{experiment_name}")
+async def get_ab_experiment_results(experiment_name: str):
+    """
+    Get results for a specific experiment.
+
+    Args:
+        experiment_name: Name of the experiment
+
+    Returns:
+        Experiment results
+    """
+    if experiment_name not in active_experiments:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Experiment '{experiment_name}' not found"
+        )
+
+    experiment = active_experiments[experiment_name]
+    return experiment.get_results()
+
+
+@app.post("/ab/experiments/{experiment_name}/test")
+async def run_ab_statistical_test(
+    experiment_name: str,
+    variant_a: str,
+    variant_b: str,
+    metric: str = "success_rate"
+):
+    """
+    Run statistical significance test between variants.
+
+    Args:
+        experiment_name: Name of the experiment
+        variant_a: First variant name
+        variant_b: Second variant name
+        metric: Metric to compare
+
+    Returns:
+        Statistical test results
+    """
+    if experiment_name not in active_experiments:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Experiment '{experiment_name}' not found"
+        )
+
+    experiment = active_experiments[experiment_name]
+
+    try:
+        test_result = experiment.run_statistical_test(variant_a, variant_b, metric)
+        return test_result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/ab/experiments/{experiment_name}/promote")
+async def promote_challenger(
+    experiment_name: str,
+    champion: str,
+    challenger: str,
+    min_improvement: float = 0.01
+):
+    """
+    Check if challenger should be promoted to champion.
+
+    Args:
+        experiment_name: Name of the experiment
+        champion: Current champion variant
+        challenger: Challenger variant
+        min_improvement: Minimum improvement required
+
+    Returns:
+        Promotion recommendation
+    """
+    if experiment_name not in active_experiments:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Experiment '{experiment_name}' not found"
+        )
+
+    experiment = active_experiments[experiment_name]
+
+    should_promote, reason = experiment.should_promote_challenger(
+        champion, challenger, min_improvement
+    )
+
+    return {
+        "should_promote": should_promote,
+        "reason": reason,
+        "champion": champion,
+        "challenger": challenger,
+        "experiment_name": experiment_name
+    }
+
+
+@app.delete("/ab/experiments/{experiment_name}")
+async def stop_ab_experiment(experiment_name: str, save_results: bool = True):
+    """
+    Stop an A/B experiment.
+
+    Args:
+        experiment_name: Name of the experiment
+        save_results: Whether to save results before stopping
+
+    Returns:
+        Status message
+    """
+    if experiment_name not in active_experiments:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Experiment '{experiment_name}' not found"
+        )
+
+    experiment = active_experiments[experiment_name]
+
+    results_file = None
+    report_file = None
+
+    if save_results:
+        results_file = experiment.save_results()
+        report_file = experiment.generate_report()
+
+    del active_experiments[experiment_name]
+
+    logger.info(f"Stopped A/B experiment: {experiment_name}")
+
+    return {
+        "status": "success",
+        "message": f"Experiment '{experiment_name}' stopped",
+        "results_saved": save_results,
+        "results_file": results_file,
+        "report_file": report_file
+    }
+
+
+@app.post("/ab/experiments/{experiment_name}/record_feedback")
+async def record_ab_feedback(
+    experiment_name: str,
+    variant_name: str,
+    success: bool = True,
+    reward: float = 1.0
+):
+    """
+    Record user feedback for a prediction.
+
+    Args:
+        experiment_name: Name of the experiment
+        variant_name: Variant that made the prediction
+        success: Whether prediction was successful
+        reward: Reward value
+
+    Returns:
+        Status message
+    """
+    if experiment_name not in active_experiments:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Experiment '{experiment_name}' not found"
+        )
+
+    experiment = active_experiments[experiment_name]
+    experiment.record_result(variant_name, success, reward)
+
+    return {
+        "status": "success",
+        "message": "Feedback recorded",
+        "variant": variant_name
     }
 
 

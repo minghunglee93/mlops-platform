@@ -41,7 +41,15 @@ A production-ready MLOps platform for the complete machine learning lifecycle: t
 - **Visual Reports**: Interactive HTML dashboards with Evidently
 - **Alert System**: Threshold-based notifications
 
-### Phase 4: Advanced Features (Coming Soon)
+### Phase 4: A/B Testing (✅ Complete)
+- **Champion/Challenger Testing**: Compare model versions safely
+- **Traffic Splitting**: Multiple strategies (fixed, epsilon-greedy, Thompson sampling, UCB)
+- **Statistical Testing**: Automated significance tests
+- **Multi-Armed Bandits**: Intelligent traffic allocation
+- **Automated Promotion**: Data-driven winner selection
+- **Performance Tracking**: Real-time metrics and rewards
+
+### Phase 5: Advanced Features (Coming Soon)
 - Feature store integration
 - A/B testing framework
 - Model drift detection
@@ -367,8 +375,8 @@ Integration with:
 - [x] Basic monitoring with Prometheus
 - [x] Feature store with Feast
 - [x] Feature engineering utilities
-- [ ] Data drift detection (Evidently)
-- [ ] A/B testing framework
+- [x] Data drift detection (Evidently)
+- [x] A/B testing framework
 - [ ] Automated retraining
 - [ ] Kubernetes deployment
 - [ ] CI/CD pipelines
