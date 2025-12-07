@@ -8,7 +8,6 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 import logging
 from datetime import datetime
-import mlflow
 from prometheus_client import Counter, Histogram, generate_latest
 from fastapi.responses import Response
 import time
@@ -23,6 +22,11 @@ from config import settings
 from registry.model_registry import ModelRegistry
 from monitoring.drift_detector import DriftDetector
 from ab_testing.experiment import ABExperiment, ModelVariant, TrafficSplitStrategy
+from retraining.scheduler import (
+    RetrainingScheduler,
+    RetrainingConfig,
+    RetrainingTrigger
+)
 
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger(__name__)
@@ -72,6 +76,8 @@ reference_data_buffer: List[Dict] = []  # Store recent predictions for drift det
 # A/B testing experiments
 active_experiments: Dict[str, ABExperiment] = {}
 
+# Retraining Schedulers
+active_schedulers: Dict[str, RetrainingScheduler] = {}
 
 # Request/Response Models
 class PredictionRequest(BaseModel):
@@ -111,6 +117,22 @@ class HealthResponse(BaseModel):
     status: str
     timestamp: str
     loaded_models: int
+
+
+class RetrainingConfigRequest(BaseModel):
+    """Request model for retraining configuration."""
+    model_name: str
+    performance_threshold: float = 0.05
+    drift_threshold: float = 0.1
+    schedule_enabled: bool = False
+    schedule_interval_days: int = 7
+    auto_promote: bool = False
+
+
+class RetrainingTriggerRequest(BaseModel):
+    """Request model for triggering retraining."""
+    trigger_type: str = Field(..., description="manual, performance, drift, or scheduled")
+    reason: str = Field(..., description="Reason for retraining")
 
 
 # Helper Functions
@@ -930,6 +952,455 @@ async def batch_predict(request: BatchPredictionRequest):
     except Exception as e:
         logger.error(f"Batch prediction error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/retraining/configure")
+async def configure_retraining(config_req: RetrainingConfigRequest):
+    """
+    Configure automated retraining for a model.
+
+    Args:
+        config_req: Retraining configuration
+
+    Returns:
+        Configuration status
+    """
+    global active_schedulers
+
+    try:
+        # Create config
+        config = RetrainingConfig(
+            model_name=config_req.model_name,
+            performance_threshold=config_req.performance_threshold,
+            drift_threshold=config_req.drift_threshold,
+            schedule_enabled=config_req.schedule_enabled,
+            schedule_interval_days=config_req.schedule_interval_days,
+            auto_promote=config_req.auto_promote
+        )
+
+        # Data loader (in production, load from your data source)
+        def data_loader():
+            # Placeholder - replace with actual data loading
+            from sklearn.datasets import make_classification
+            X, y = make_classification(n_samples=2000, n_features=20)
+            df = pd.DataFrame(X, columns=[f'feature_{i}' for i in range(20)])
+            df['target'] = y
+            return df
+
+        # Create training pipeline
+        pipeline = TrainingPipeline(
+            experiment_name=f"retraining_{config_req.model_name}",
+            model_type="sklearn"
+        )
+
+        # Initialize scheduler
+        scheduler = RetrainingScheduler(
+            config=config,
+            data_loader=data_loader,
+            training_pipeline=pipeline
+        )
+
+        # Store scheduler
+        active_schedulers[config_req.model_name] = scheduler
+
+        # Setup scheduled retraining if enabled
+        if config.schedule_enabled:
+            scheduler.schedule_periodic_retraining()
+
+        logger.info(f"Retraining configured for model: {config_req.model_name}")
+
+        return {
+            "status": "success",
+            "message": f"Retraining configured for {config_req.model_name}",
+            "config": config.to_dict()
+        }
+
+    except Exception as e:
+        logger.error(f"Error configuring retraining: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/retraining/{model_name}/initialize")
+async def initialize_retraining_monitors(
+        model_name: str,
+        reference_data_path: Optional[str] = None
+):
+    """
+    Initialize drift detector and performance monitor for a model.
+
+    Args:
+        model_name: Name of the model
+        reference_data_path: Path to reference data CSV (optional)
+
+    Returns:
+        Initialization status
+    """
+    if model_name not in active_schedulers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduler configured for model: {model_name}"
+        )
+
+    scheduler = active_schedulers[model_name]
+
+    try:
+        # Load reference data
+        if reference_data_path:
+            ref_data = pd.read_csv(reference_data_path)
+        else:
+            # Use recent production data from buffer
+            if not reference_data_buffer:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No reference data available. Provide reference_data_path or make some predictions first"
+                )
+            ref_data = pd.DataFrame([
+                {'feature_' + str(i): val for i, val in enumerate(item['features'])}
+                for item in reference_data_buffer[-1000:]
+            ])
+
+        # Get baseline metrics from model registry
+        model_versions = registry.get_model_versions(model_name)
+        if not model_versions:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No versions found for model: {model_name}"
+            )
+
+        # Use metrics from latest version
+        baseline_metrics = {
+            'accuracy': 0.85,  # Placeholder - should load from registry
+            'f1_score': 0.83
+        }
+
+        # Initialize monitors
+        scheduler.initialize_monitors(ref_data, baseline_metrics)
+
+        logger.info(f"Monitors initialized for model: {model_name}")
+
+        return {
+            "status": "success",
+            "message": f"Monitors initialized for {model_name}",
+            "reference_samples": len(ref_data),
+            "baseline_metrics": baseline_metrics
+        }
+
+    except Exception as e:
+        logger.error(f"Error initializing monitors: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/retraining/{model_name}/trigger")
+async def trigger_retraining(model_name: str, request: RetrainingTriggerRequest):
+    """
+    Manually trigger retraining for a model.
+
+    Args:
+        model_name: Name of the model
+        request: Trigger request with type and reason
+
+    Returns:
+        Retraining job details
+    """
+    if model_name not in active_schedulers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduler configured for model: {model_name}"
+        )
+
+    scheduler = active_schedulers[model_name]
+
+    try:
+        # Map trigger type to enum
+        trigger_map = {
+            'manual': RetrainingTrigger.MANUAL,
+            'performance': RetrainingTrigger.PERFORMANCE_DEGRADATION,
+            'drift': RetrainingTrigger.DATA_DRIFT,
+            'scheduled': RetrainingTrigger.SCHEDULED
+        }
+
+        trigger = trigger_map.get(request.trigger_type.lower())
+        if not trigger:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid trigger type: {request.trigger_type}"
+            )
+
+        # Trigger retraining
+        job = scheduler.trigger_retraining(
+            trigger=trigger,
+            reason=request.reason
+        )
+
+        logger.info(f"Retraining triggered for {model_name}: {job.job_id}")
+
+        return {
+            "status": "success",
+            "job": job.to_dict()
+        }
+
+    except Exception as e:
+        logger.error(f"Error triggering retraining: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/retraining/{model_name}/check")
+async def check_retraining_needed(model_name: str):
+    """
+    Check if retraining is needed based on current data.
+
+    Args:
+        model_name: Name of the model
+
+    Returns:
+        Retraining recommendation
+    """
+    if model_name not in active_schedulers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduler configured for model: {model_name}"
+        )
+
+    scheduler = active_schedulers[model_name]
+
+    try:
+        # Get recent production data
+        if not reference_data_buffer:
+            return {
+                "needs_retraining": False,
+                "reason": "Insufficient production data for analysis"
+            }
+
+        current_data = pd.DataFrame([
+            {'feature_' + str(i): val for i, val in enumerate(item['features'])}
+            for item in reference_data_buffer[-200:]
+        ])
+
+        # Check retraining needed
+        needs_retraining, trigger, reason = scheduler.check_retraining_needed(current_data)
+
+        return {
+            "needs_retraining": needs_retraining,
+            "trigger": trigger.value if trigger else None,
+            "reason": reason,
+            "samples_analyzed": len(current_data)
+        }
+
+    except Exception as e:
+        logger.error(f"Error checking retraining: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/retraining/{model_name}/jobs")
+async def get_retraining_jobs(model_name: str, limit: int = 10):
+    """
+    Get retraining job history for a model.
+
+    Args:
+        model_name: Name of the model
+        limit: Number of recent jobs to return
+
+    Returns:
+        List of retraining jobs
+    """
+    if model_name not in active_schedulers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduler configured for model: {model_name}"
+        )
+
+    scheduler = active_schedulers[model_name]
+    job_history = scheduler.get_job_history(limit=limit)
+
+    return {
+        "model_name": model_name,
+        "total_jobs": len(job_history),
+        "jobs": job_history
+    }
+
+
+@app.get("/retraining/{model_name}/jobs/{job_id}")
+async def get_retraining_job_status(model_name: str, job_id: str):
+    """
+    Get status of a specific retraining job.
+
+    Args:
+        model_name: Name of the model
+        job_id: Job identifier
+
+    Returns:
+        Job status details
+    """
+    if model_name not in active_schedulers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduler configured for model: {model_name}"
+        )
+
+    scheduler = active_schedulers[model_name]
+    job_status = scheduler.get_job_status(job_id)
+
+    if not job_status:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Job not found: {job_id}"
+        )
+
+    return job_status
+
+
+@app.get("/retraining/{model_name}/config")
+async def get_retraining_config(model_name: str):
+    """
+    Get retraining configuration for a model.
+
+    Args:
+        model_name: Name of the model
+
+    Returns:
+        Retraining configuration
+    """
+    if model_name not in active_schedulers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduler configured for model: {model_name}"
+        )
+
+    scheduler = active_schedulers[model_name]
+
+    return {
+        "model_name": model_name,
+        "config": scheduler.config.to_dict(),
+        "monitors_initialized": scheduler.drift_detector is not None
+    }
+
+
+@app.post("/retraining/{model_name}/start-monitoring")
+async def start_monitoring(model_name: str, check_interval_seconds: int = 3600):
+    """
+    Start continuous monitoring for a model.
+
+    Args:
+        model_name: Name of the model
+        check_interval_seconds: Monitoring interval in seconds
+
+    Returns:
+        Status message
+    """
+    if model_name not in active_schedulers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduler configured for model: {model_name}"
+        )
+
+    scheduler = active_schedulers[model_name]
+
+    try:
+        scheduler.start_monitoring(check_interval_seconds=check_interval_seconds)
+
+        return {
+            "status": "success",
+            "message": f"Monitoring started for {model_name}",
+            "check_interval_seconds": check_interval_seconds
+        }
+
+    except Exception as e:
+        logger.error(f"Error starting monitoring: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/retraining/{model_name}/stop-monitoring")
+async def stop_monitoring(model_name: str):
+    """
+    Stop continuous monitoring for a model.
+
+    Args:
+        model_name: Name of the model
+
+    Returns:
+        Status message
+    """
+    if model_name not in active_schedulers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduler configured for model: {model_name}"
+        )
+
+    scheduler = active_schedulers[model_name]
+
+    try:
+        scheduler.stop_monitoring()
+
+        return {
+            "status": "success",
+            "message": f"Monitoring stopped for {model_name}"
+        }
+
+    except Exception as e:
+        logger.error(f"Error stopping monitoring: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/retraining/{model_name}/report")
+async def generate_retraining_report(model_name: str):
+    """
+    Generate retraining summary report.
+
+    Args:
+        model_name: Name of the model
+
+    Returns:
+        Report file path
+    """
+    if model_name not in active_schedulers:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No scheduler configured for model: {model_name}"
+        )
+
+    scheduler = active_schedulers[model_name]
+
+    try:
+        report_path = scheduler.generate_report()
+
+        return {
+            "status": "success",
+            "report_path": report_path,
+            "message": "Report generated successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/retraining/status")
+async def retraining_system_status():
+    """
+    Get overall retraining system status.
+
+    Returns:
+        System status summary
+    """
+    schedulers_status = []
+
+    for model_name, scheduler in active_schedulers.items():
+        job_history = scheduler.get_job_history(limit=100)
+
+        schedulers_status.append({
+            "model_name": model_name,
+            "monitoring_active": scheduler.is_monitoring,
+            "total_jobs": len(job_history),
+            "successful_jobs": sum(1 for j in job_history if j['status'] == 'completed'),
+            "failed_jobs": sum(1 for j in job_history if j['status'] == 'failed'),
+            "schedule_enabled": scheduler.config.schedule_enabled,
+            "auto_promote": scheduler.config.auto_promote
+        })
+
+    return {
+        "total_models": len(active_schedulers),
+        "schedulers": schedulers_status
+    }
 
 
 if __name__ == "__main__":
