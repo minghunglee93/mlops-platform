@@ -1,0 +1,170 @@
+# Default values for mlops-platform
+replicaCount: 3
+
+image:
+  repository: mlops-platform
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8000"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  allowPrivilegeEscalation: false
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: api.mlops.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: mlops-tls
+      hosts:
+        - api.mlops.example.com
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+persistence:
+  models:
+    enabled: true
+    storageClass: standard
+    accessMode: ReadWriteMany
+    size: 50Gi
+  data:
+    enabled: true
+    storageClass: standard
+    accessMode: ReadWriteMany
+    size: 100Gi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app
+            operator: In
+            values:
+            - mlops-api
+        topologyKey: kubernetes.io/hostname
+
+# MLflow configuration
+mlflow:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/mlflow/mlflow
+    tag: latest
+  service:
+    port: 5000
+  ingress:
+    enabled: true
+    host: mlflow.mlops.example.com
+  persistence:
+    enabled: true
+    size: 100Gi
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  auth:
+    username: mlflow
+    password: CHANGE_ME
+    database: mlflow
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+  resources:
+    limits:
+      memory: 512Mi
+      cpu: 500m
+    requests:
+      memory: 256Mi
+      cpu: 250m
+
+# Prometheus configuration
+prometheus:
+  enabled: true
+  replicaCount: 1
+  service:
+    port: 9090
+  persistence:
+    enabled: true
+    size: 50Gi
+  retention: 30d
+
+# Grafana configuration
+grafana:
+  enabled: true
+  replicaCount: 1
+  service:
+    port: 3000
+  ingress:
+    enabled: true
+    host: grafana.mlops.example.com
+  persistence:
+    enabled: true
+    size: 10Gi
+  adminPassword: CHANGE_ME
+
+# Environment variables
+env:
+  PROJECT_NAME: "mlops-platform"
+  LOG_LEVEL: "INFO"
+  ENABLE_MONITORING: "true"
+  DRIFT_DETECTION_THRESHOLD: "0.05"
+
+# Secrets (use external secrets in production)
+secrets:
+  create: true
+  postgresPassword: CHANGE_ME
+  grafanaPassword: CHANGE_ME
