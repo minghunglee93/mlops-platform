@@ -1,0 +1,78 @@
+name: Scheduled Retraining
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly Sunday at 2 AM
+  workflow_dispatch:
+    inputs:
+      model_name:
+        description: 'Model to retrain'
+        required: true
+        default: 'classifier_model'
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    outputs:
+      needs_retraining: ${{ steps.check.outputs.needs_retraining }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: pip install -e .
+        
+      - name: Check if retraining needed
+        id: check
+        run: |
+          RESULT=$(python scripts/check_drift.py --model ${{ github.event.inputs.model_name || 'classifier_model' }})
+          echo "needs_retraining=$RESULT" >> $GITHUB_OUTPUT
+
+  retrain:
+    needs: check-drift
+    if: needs.check-drift.outputs.needs_retraining == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: pip install -e .
+        
+      - name: Trigger retraining
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+        run: |
+          python scripts/trigger_retraining.py \
+            --model ${{ github.event.inputs.model_name || 'classifier_model' }} \
+            --reason "Scheduled retraining - drift detected"
+            
+      - name: Validate new model
+        run: |
+          python scripts/validate_model.py \
+            --environment staging \
+            --min-accuracy 0.85
+
+  promote:
+    needs: retrain
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Promote model
+        run: |
+          python scripts/promote_model.py \
+            --model ${{ github.event.inputs.model_name || 'classifier_model' }} \
+            --stage Production

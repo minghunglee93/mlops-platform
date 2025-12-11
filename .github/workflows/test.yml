@@ -1,0 +1,136 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          
+      - name: Install dependencies
+        run: |
+          pip install flake8 black isort mypy
+          pip install -r requirements.txt
+          
+      - name: Lint with flake8
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        
+      - name: Check formatting with black
+        run: black --check .
+        
+      - name: Check import sorting
+        run: isort --check-only .
+        
+      - name: Type checking with mypy
+        run: mypy training/ registry/ serving/ --ignore-missing-imports
+        continue-on-error: true
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-${{ matrix.python-version }}-pip-${{ hashFiles('requirements.txt') }}
+          
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e .
+          pip install pytest pytest-cov pytest-asyncio
+          
+      - name: Run unit tests
+        run: pytest tests/ -v --cov=. --cov-report=xml --cov-report=term
+        
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  integration-test:
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: mlflow_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          
+      - name: Run integration tests
+        env:
+          MLFLOW_TRACKING_URI: postgresql://postgres:testpass@localhost:5432/mlflow_test
+        run: |
+          python examples/train_example.py
+          pytest tests/integration/ -v
+        continue-on-error: true
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Bandit security scan
+        run: |
+          pip install bandit
+          bandit -r . -f json -o bandit-report.json || true
+          
+      - name: Run Safety check
+        run: |
+          pip install safety
+          safety check --json || true
+          
+      - name: Upload security reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: bandit-report.json

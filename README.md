@@ -73,8 +73,15 @@ A production-ready MLOps platform for the complete machine learning lifecycle: t
 - **Monitoring**: Prometheus + Grafana integration
 - **Resource Management**: Quotas, limits, and PodDisruptionBudget
 
+### Phase 7: CI/CD Pipelines ✅
+- **GitHub Actions**: Automated testing and deployment
+- **Multi-Environment**: Dev → Staging → Production
+- **Model Validation**: Quality gates before deployment
+- **Automated Retraining**: Scheduled model updates
+- **Security Scanning**: SBOM, vulnerability detection
+- **Rollback Strategy**: Automatic failure recovery
+
 ### Coming Soon
-- CI/CD Pipelines
 - Web UI Dashboard
 
 ## 📁 Project Structure
@@ -132,9 +139,19 @@ mlops-platform/
 │       ├── values.yaml
 │       └── templates/
 │
+├── .github/workflows/        # CI/CD pipelines
+│   ├── test.yml
+│   ├── build-and-push.yml
+│   ├── deploy.yml
+│   └── scheduled-retrain.yml
+│
 ├── scripts/
 │   ├── deploy-k8s.sh           # Kubernetes deployment
-│   └── deploy-helm.sh          # Helm deployment
+│   ├── deploy-helm.sh          # Helm deployment
+│   ├── validate_model.py       # Model validation
+│   ├── smoke_test.py           # Post-deploy tests
+│   ├── check_drift.py          # Drift checking
+│   └── promote_model.py        # Model promotion
 │
 ├── examples/
 │   ├── train_example.py
@@ -208,6 +225,7 @@ kubectl port-forward svc/mlops-api-service 8000:8000 -n mlops
 - [Feature Store](FEATURE_STORE.md)
 - [Automated Retraining](AUTOMATED_RETRAINING.md)
 - [Kubernetes Deployment](KUBERNETES_DEPLOYMENT.md)
+- [CI/CD Pipelines](CICD.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 
 ## 🔧 Configuration
@@ -490,6 +508,64 @@ kubectl port-forward svc/mlflow-service 5000:5000 -n mlops
 # https://api.mlops.example.com
 # https://mlflow.mlops.example.com
 # https://grafana.mlops.example.com
+```
+
+## 🔄 CI/CD Pipelines
+
+### Automated Workflows
+
+**Test Pipeline** (on PR/Push):
+- Linting (flake8, black, isort)
+- Unit tests (Python 3.9, 3.10, 3.11)
+- Integration tests with PostgreSQL
+- Security scans (bandit, trivy)
+
+**Build & Push** (on main branch):
+- Multi-arch Docker images (amd64, arm64)
+- Push to GitHub Container Registry
+- SBOM generation
+- Vulnerability scanning
+
+**Deploy** (manual):
+- Model validation gates
+- Deploy to dev/staging/production
+- Smoke tests
+- Automatic rollback on failure
+
+**Scheduled Retraining** (weekly):
+- Check for drift
+- Auto-retrain if needed
+- Validate new model
+- Promote if better
+
+### Setup
+
+```bash
+# Install pre-commit hooks
+pip install pre-commit
+pre-commit install
+
+# Configure secrets in GitHub
+# Settings → Secrets → Actions:
+# - KUBECONFIG
+# - MLFLOW_TRACKING_URI
+# - SLACK_WEBHOOK
+```
+
+### Deploy via GitHub Actions
+
+```bash
+# Via UI: Actions → Deploy → Run workflow
+# Or via CLI:
+gh workflow run deploy.yml \
+  -f environment=staging \
+  -f image_tag=v1.0.0
+```
+
+### Multi-Environment Strategy
+
+```
+Dev (auto) → Staging (manual) → Production (approval)
 ```
 
 ## 🔧 Makefile Commands
